@@ -5,7 +5,7 @@
 #include <math.h>
 #include <string.h>
 
-// GPIO 번호 아닌 XIAO 핀 이름: D5 = GPIO6, D4 = GPIO5
+// XIAO labels, not raw GPIO numbers: D5 is GPIO6; D4 is GPIO5.
 namespace ivlcd {
 constexpr int kBacklightPin = D5;
 constexpr size_t kCapacity = 256;  // 자동 레인지 측정: uA 최대 89점 + mA 최대 89점
@@ -24,9 +24,9 @@ class Graph {
   void begin() {
     digitalWrite(kBacklightPin, LOW);
     pinMode(kBacklightPin, OUTPUT);
-    SPI.begin(D8, -1, D10, D1);  // SCK, MISO(미사용), MOSI, CS
-    tft.begin(16000000);          // 점퍼선 배선 고려 저속 설정
-    tft.setRotation(1);          // 320 x 240 가로 화면
+    SPI.begin(D8, -1, D10, D1);  // SCK, unused MISO, MOSI, CS.
+    tft.begin(16000000);          // Conservative speed for breadboard jumpers.
+    tft.setRotation(1);          // 320 x 240 landscape.
     tft.fillScreen(ILI9341_BLACK);
     tft.setTextWrap(false);
     setBacklight(true);
@@ -35,7 +35,7 @@ class Graph {
   void setBacklight(bool enabled) {
     backlight = enabled;
     digitalWrite(kBacklightPin, enabled ? HIGH : LOW);
-    dirty = true;  // 백라이트 ON 시 최신 데이터 재표시
+    dirty = true;  // Redraw the latest data when light returns.
   }
 
   void setStatus(const char* value) { status = value; dirty = true; }
@@ -72,7 +72,7 @@ class Graph {
     setStatus(!dataFault && expected > 0 && expected == count ? "COMPLETE" : "INCOMPLETE");
   }
 
-  // UART/BLE/감시 처리 후 호출, 재표시는 여러 loop에 분할
+  // Called after UART/BLE/watchdog work. A redraw is split across loop turns.
   void service() {
     if (!backlight) return;
     if (!rendering) {
@@ -109,7 +109,7 @@ class Graph {
   }
 
   void axes() {
-    // 폰 전송값과 동일한 V/A 기준 축 자동 조정
+    // Autoscale from the same accepted V/A samples sent to the phone.
     vLow = iLow = 0;
     vHigh = iHigh = 1;
     if (drawnCount) {

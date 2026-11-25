@@ -15,16 +15,16 @@
 
 namespace {
 constexpr uint32_t kBaud = 115200;
-constexpr float kAdcReferenceV = 5.0f;  // 명목값, 측정 중 ADS1115 기준 보정(refScale)
+constexpr float kAdcReferenceV = 5.0f;  // Nominal until checked against a meter. (추가: 측정 중 ADS1115 기준 보정, refScale)
 constexpr float kMaSenseOhms = 200.0f;
 constexpr float kUaSenseOhms = 10000.0f;
-constexpr float kSweepCurrentLimitA = 0.008f;  // 측정 종료 전류 한계
-constexpr float kCurrentCutoffA = 0.012f;  // 소프트웨어 차단 전류 (200 ohm 직렬 저항 상시 장착 전제)
+constexpr float kSweepCurrentLimitA = 0.008f;  // End the sweep at this measured current boundary.
+constexpr float kCurrentCutoffA = 0.012f;  // Software fault cutoff; the 200 ohm series resistor stays fitted.
 constexpr uint16_t kAdcMax = 16383;
 constexpr float kUnoVoltsPerCount = kAdcReferenceV / kAdcMax;
 constexpr float kDacVoltsPerCode = kAdcReferenceV / 1024.0f;
-constexpr uint16_t kLastDacCode = 880;  // 명목 4.297 V, DUT 전압 아닌 소스 전압
-constexpr uint16_t kDacStep = 10;  // 명목 48.8 mV, 200 ohm 기준 스텝당 전류 증가폭 제한
+constexpr uint16_t kLastDacCode = 880;  // Nominal 4.297 V; source voltage, not DUT voltage.
+constexpr uint16_t kDacStep = 10;  // Nominal 48.8 mV; bounds the next-step current increment through 200 ohms.
 constexpr float kNominalSourceMaxV = kDacVoltsPerCode * kLastDacCode;
 constexpr float kOutputToleranceV = 0.25f;
 static_assert(kNominalSourceMaxV <= 4.3f, "Review DUT ratings before increasing the sweep voltage");
@@ -220,7 +220,8 @@ void fail(const char* code, const char* message) {
 
 void finishSweep(Range lastRange, const char* reason) {
   zeroOutput();
-  // 완료 = 설정 전압 또는 전류 한계 도달
+  // This range event is understood, displayed and saved by the existing phone app.
+  // Completion means the configured voltage OR current boundary was reached.
   sendRange(lastRange, reason);
   JsonDocument done;
   done["count"] = seq;
@@ -321,7 +322,7 @@ void handleCommand(const char* line) {
 }
 
 void readCommands() {
-  // 루프당 처리량 제한 (시리얼 입력으로 인한 감시 처리 지연 방지)
+  // Bound work per iteration so serial input cannot starve the watchdog.
   for (size_t read = 0; read < sizeof(rx) && Serial1.available(); ++read) {
     const char byte = static_cast<char>(Serial1.read());
     if (byte == '\n') {
@@ -432,7 +433,7 @@ void measure(uint32_t now) {
     if (!seq) {
       fail("OUTPUT_NOT_ZERO", "Current detected before a valid first point. Check output and wiring.");
     } else {
-      // 미안정·한계 초과 점 미전송, 마지막 완료 평균값까지만 유지
+      // Do not append an unsettled or over-boundary point. Keep the last completed averages.
       finishSweep(Range::ma, "전류 상한 8mA 도달 · 마지막 안정 측정점까지 완료 · 최대 전압 미도달");
     }
     return;
@@ -461,14 +462,14 @@ void measure(uint32_t now) {
 }  // namespace
 
 void setup() {
-  pinMode(2, INPUT);  // mA 실드 D2-센스 노드 연결, 입력으로 설정
+  pinMode(2, INPUT);  // D2 may share the sense node on the mA shield.
   pinMode(kRangeRelayPin, OUTPUT);
   analogWriteResolution(10);
   analogReadResolution(14);
   zeroOutput();
   Wire.begin();
   Wire.setClock(400000);
-  Serial1.begin(kBaud);  // D0 RX / D1 TX, USB Serial과 별개
+  Serial1.begin(kBaud);  // D0 RX / D1 TX, independent of USB Serial.
 }
 
 void loop() {

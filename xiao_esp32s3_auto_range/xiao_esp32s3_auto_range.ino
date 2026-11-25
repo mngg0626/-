@@ -26,8 +26,8 @@ struct BleFragment {
   char data[kAttPayload];
 };
 
-// 프레임·측정 상태 변경은 Arduino loop 전용, BLE 콜백은 조각 큐 적재만 담당
-std::atomic<uint32_t> linkEpoch{0};  // 홀수 = 폰 연결 상태
+// Only the Arduino loop modifies framing and sweep state. BLE callbacks queue fragments.
+std::atomic<uint32_t> linkEpoch{0};  // Odd values identify a connected peer.
 uint32_t sessionEpoch = 0;
 QueueHandle_t fragments;
 BLECharacteristic* notifications;
@@ -119,7 +119,7 @@ void urgentStop() {
 void queueLine(const char* line) {
   const size_t length = strlen(line);
   if (count == kOutCapacity || length >= kFrameBytes) {
-    // 폰 수신 지연 시 DUT 전원 차단
+    // Stop powering the DUT if the phone cannot keep up with the stream.
     if (sweep != SweepState::idle) urgentStop();
     sweep = SweepState::idle;
     lcd.setStatus("BLE QUEUE ERROR");
@@ -157,7 +157,7 @@ void handlePhoneCommand(const char* line) {
   const char* id = command["id"] | "";
   if (strlen(id) != 32 || strspn(id, "0123456789abcdef") != 32) return;
   const char* type = command["type"] | "";
-  // LCD 명령은 ESP32 단독 처리, UNO 미전달
+  // LCD commands are local to ESP32 and never forwarded to the UNO.
   if (strcmp(type, "backlight") == 0) {
     char request[48];
     snprintf(request, sizeof(request), "%s:backlight", id);
@@ -186,7 +186,7 @@ void handlePhoneCommand(const char* line) {
     lcd.reset();
     lastKeepalive = millis();
   } else {
-    // stop과 마지막 측정점 엇갈림 가능, UNO는 직전 측정 ID 보존
+    // A stop can race the final point. Arduino still remembers the last run ID.
     if (strcmp(id, runId) != 0) {
       reject(id, "stop", "Measurement ID not active on ESP32");
       return;
@@ -215,7 +215,7 @@ void handleUartEvent(const char* line) {
     sweep = isStart && event["ok"].as<bool>() ? SweepState::running : SweepState::idle;
     lcd.setStatus(sweep == SweepState::running ? "MEASURING" : event["ok"].as<bool>() ? "STOPPED" : "COMMAND ERROR");
   } else if (strcmp(type, "error") == 0) {
-    if (sweep == SweepState::stopping) return;  // 실제 stop ACK 대기
+    if (sweep == SweepState::stopping) return;  // Wait for the actual stop ACK.
     sweep = SweepState::idle;
     lcd.setStatus("MEASUREMENT ERROR");
   } else if (strcmp(type, "done") == 0) {
@@ -302,8 +302,8 @@ void sendNotification(uint32_t now) {
 }  // namespace
 
 void setup() {
-  lcd.begin();  // 측정 전·BLE 광고 전 초기화
-  Serial1.setRxBufferSize(2048);  // 그래프 초기화 중 몰리는 point/range/done 수신 버퍼
+  lcd.begin();  // Initialize before advertising, outside an active measurement.
+  Serial1.setRxBufferSize(2048);  // Absorb point/range/done bursts while a plot is cleared.
   Serial1.begin(kBaud, SERIAL_8N1, D7, D6);
   fragments = xQueueCreate(24, sizeof(BleFragment));
   if (!fragments) return;
@@ -317,7 +317,7 @@ void setup() {
   commands->setCallbacks(new WriteCallbacks());
   service->start();
 
-  // 광고 설정은 BLE 스택에 위임 후 시작
+  // Let the BLE stack configure the legacy advertisement before starting it.
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(kServiceUuid);
   advertising->setScanResponse(true);
