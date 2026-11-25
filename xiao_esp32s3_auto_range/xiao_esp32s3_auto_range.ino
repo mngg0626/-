@@ -26,8 +26,8 @@ struct BleFragment {
   char data[kAttPayload];
 };
 
-// 프레임·측정 상태는 Arduino loop에서만 바꿈. BLE 콜백은 조각을 큐에 넣기만 함.
-std::atomic<uint32_t> linkEpoch{0};  // 홀수면 폰이 연결된 상태임.
+// 프레임·측정 상태 변경은 Arduino loop 전용, BLE 콜백은 조각 큐 적재만 담당
+std::atomic<uint32_t> linkEpoch{0};  // 홀수 = 폰 연결 상태
 uint32_t sessionEpoch = 0;
 QueueHandle_t fragments;
 BLECharacteristic* notifications;
@@ -119,7 +119,7 @@ void urgentStop() {
 void queueLine(const char* line) {
   const size_t length = strlen(line);
   if (count == kOutCapacity || length >= kFrameBytes) {
-    // 폰이 데이터를 못 따라오면 DUT 전원을 끊음.
+    // 폰 수신 지연 시 DUT 전원 차단
     if (sweep != SweepState::idle) urgentStop();
     sweep = SweepState::idle;
     lcd.setStatus("BLE QUEUE ERROR");
@@ -157,7 +157,7 @@ void handlePhoneCommand(const char* line) {
   const char* id = command["id"] | "";
   if (strlen(id) != 32 || strspn(id, "0123456789abcdef") != 32) return;
   const char* type = command["type"] | "";
-  // LCD 명령은 ESP32에서만 처리하고 UNO로 넘기지 않음.
+  // LCD 명령은 ESP32 단독 처리, UNO 미전달
   if (strcmp(type, "backlight") == 0) {
     char request[48];
     snprintf(request, sizeof(request), "%s:backlight", id);
@@ -186,7 +186,7 @@ void handlePhoneCommand(const char* line) {
     lcd.reset();
     lastKeepalive = millis();
   } else {
-    // stop이 마지막 측정점과 엇갈릴 수 있음. UNO는 직전 측정 ID를 아직 기억함.
+    // stop과 마지막 측정점 엇갈림 가능, UNO는 직전 측정 ID 보존
     if (strcmp(id, runId) != 0) {
       reject(id, "stop", "Measurement ID not active on ESP32");
       return;
@@ -215,7 +215,7 @@ void handleUartEvent(const char* line) {
     sweep = isStart && event["ok"].as<bool>() ? SweepState::running : SweepState::idle;
     lcd.setStatus(sweep == SweepState::running ? "MEASURING" : event["ok"].as<bool>() ? "STOPPED" : "COMMAND ERROR");
   } else if (strcmp(type, "error") == 0) {
-    if (sweep == SweepState::stopping) return;  // 실제 stop ACK를 기다림.
+    if (sweep == SweepState::stopping) return;  // 실제 stop ACK 대기
     sweep = SweepState::idle;
     lcd.setStatus("MEASUREMENT ERROR");
   } else if (strcmp(type, "done") == 0) {
@@ -302,12 +302,12 @@ void sendNotification(uint32_t now) {
 }  // namespace
 
 void setup() {
-  lcd.begin();  // 측정 전, BLE 광고 시작 전에 초기화함.
-  Serial1.setRxBufferSize(2048);  // 그래프를 지우는 동안 몰려오는 point/range/done을 받아 둠.
+  lcd.begin();  // 측정 전·BLE 광고 전 초기화
+  Serial1.setRxBufferSize(2048);  // 그래프 초기화 중 몰리는 point/range/done 수신 버퍼
   Serial1.begin(kBaud, SERIAL_8N1, D7, D6);
   fragments = xQueueCreate(24, sizeof(BleFragment));
   if (!fragments) return;
-  BLEDevice::init("IV-Meter-mA");  // 앱이 기기를 찾도록 이름은 그대로 둠.
+  BLEDevice::init("IV-Meter-mA");  // 앱 검색용 기존 이름 유지
   BLEServer* server = BLEDevice::createServer();
   server->setCallbacks(new LinkCallbacks());
   BLEService* service = server->createService(kServiceUuid);
@@ -317,7 +317,7 @@ void setup() {
   commands->setCallbacks(new WriteCallbacks());
   service->start();
 
-  // 광고 설정을 BLE 스택에 맡긴 뒤 시작함.
+  // 광고 설정은 BLE 스택에 위임 후 시작
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(kServiceUuid);
   advertising->setScanResponse(true);

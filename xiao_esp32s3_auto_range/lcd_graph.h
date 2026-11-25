@@ -5,10 +5,10 @@
 #include <math.h>
 #include <string.h>
 
-// GPIO 번호가 아니라 XIAO 핀 이름임: D5 = GPIO6, D4 = GPIO5.
+// GPIO 번호 아닌 XIAO 핀 이름: D5 = GPIO6, D4 = GPIO5
 namespace ivlcd {
 constexpr int kBacklightPin = D5;
-constexpr size_t kCapacity = 256;  // 자동 레인지 측정: uA 최대 89점 + mA 최대 89점.
+constexpr size_t kCapacity = 256;  // 자동 레인지 측정: uA 최대 89점 + mA 최대 89점
 struct Point { float v; float ma; };
 
 class Graph {
@@ -24,9 +24,9 @@ class Graph {
   void begin() {
     digitalWrite(kBacklightPin, LOW);
     pinMode(kBacklightPin, OUTPUT);
-    SPI.begin(D8, -1, D10, D1);  // SCK, MISO(미사용), MOSI, CS.
-    tft.begin(16000000);          // 점퍼선 배선을 고려해 속도를 낮춤.
-    tft.setRotation(1);          // 320 x 240 가로 화면.
+    SPI.begin(D8, -1, D10, D1);  // SCK, MISO(미사용), MOSI, CS
+    tft.begin(16000000);          // 점퍼선 배선 고려 저속 설정
+    tft.setRotation(1);          // 320 x 240 가로 화면
     tft.fillScreen(ILI9341_BLACK);
     tft.setTextWrap(false);
     setBacklight(true);
@@ -35,12 +35,12 @@ class Graph {
   void setBacklight(bool enabled) {
     backlight = enabled;
     digitalWrite(kBacklightPin, enabled ? HIGH : LOW);
-    dirty = true;  // 백라이트가 켜지면 최신 데이터로 다시 그림.
+    dirty = true;  // 백라이트 ON 시 최신 데이터 재표시
   }
 
   void setStatus(const char* value) { status = value; dirty = true; }
 
-  // UNO가 보낸 레인지 이름을 받아 문자열 상수만 저장함(JSON 버퍼는 곧 사라짐).
+  // UNO 레인지 이름 수신, 문자열 상수만 저장 (JSON 버퍼 임시)
   void setRange(const char* value) {
     range = strcmp(value, "ua") == 0 ? "uA" : strcmp(value, "ma") == 0 ? "mA" : "--";
     dirty = true;
@@ -72,7 +72,7 @@ class Graph {
     setStatus(!dataFault && expected > 0 && expected == count ? "COMPLETE" : "INCOMPLETE");
   }
 
-  // UART/BLE/감시 처리 뒤에 호출함. 다시 그리기는 여러 loop에 나눠서 함.
+  // UART/BLE/감시 처리 후 호출, 재표시는 여러 loop에 분할
   void service() {
     if (!backlight) return;
     if (!rendering) {
@@ -109,7 +109,7 @@ class Graph {
   }
 
   void axes() {
-    // 폰으로 보낸 것과 같은 V/A 값으로 축 범위를 자동 조정함.
+    // 폰 전송값과 동일한 V/A 기준 축 자동 조정
     vLow = iLow = 0;
     vHigh = iHigh = 1;
     if (drawnCount) {
@@ -131,7 +131,7 @@ class Graph {
     char label[48];
     snprintf(label, sizeof(label), "RANGE %s", range);
     text(262, 8, label, ILI9341_YELLOW);
-    // 점은 mA로 저장함. 1 mA 미만이면 축을 uA로 표시함.
+    // 점은 mA 단위 저장, 1 mA 미만 시 축 uA 표시
     const bool micro = fmaxf(fabsf(iLow), fabsf(iHigh)) < 1.0f;
     const float unit = micro ? 1000.0f : 1.0f;
     text(1, 36, micro ? "I(uA)" : "I(mA)");
