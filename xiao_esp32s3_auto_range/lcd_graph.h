@@ -3,12 +3,13 @@
 #include <Adafruit_ILI9341.h>
 #include <SPI.h>
 #include <math.h>
+#include <string.h>
 
 // XIAO labels, not raw GPIO numbers: D5 is GPIO6; D4 is GPIO5.
 namespace ivlcd {
 constexpr int kBacklightPin = D5;
-constexpr size_t kCapacity = 256;  // At most 89 points plus the points repeated after a uA->mA handoff.
-struct Point { float v; float a; };  // Volts, amps.
+constexpr size_t kCapacity = 256;  // Auto-range sweep: at most 89 uA points plus 89 mA points.
+struct Point { float v; float ma; };
 
 class Graph {
  public:
@@ -38,7 +39,12 @@ class Graph {
   }
 
   void setStatus(const char* value) { status = value; dirty = true; }
-  void setRange(const char* value) { range = value; dirty = true; }
+
+  // Accepts the UNO range name and keeps only a string literal (the JSON buffer is temporary).
+  void setRange(const char* value) {
+    range = strcmp(value, "ua") == 0 ? "uA" : strcmp(value, "ma") == 0 ? "mA" : "--";
+    dirty = true;
+  }
 
   void reset() {
     count = 0;
@@ -50,7 +56,7 @@ class Graph {
 
   void add(uint32_t seq, float v, float a) {
     if (seq < count) {
-      if (points[seq].v != v || points[seq].a != a) dataFault = true;
+      if (points[seq].v != v || points[seq].ma != a * 1000.0f) dataFault = true;
       return;
     }
     if (seq != count || count == kCapacity || !isfinite(v) || !isfinite(a)) {
@@ -58,7 +64,7 @@ class Graph {
       setStatus("LCD DATA ERROR");
       return;
     }
-    points[count++] = {v, a};
+    points[count++] = {v, a * 1000.0f};
     dirty = true;
   }
 
@@ -80,8 +86,8 @@ class Graph {
     }
     for (int budget = 0; budget < 12 && nextPoint < drawnCount; ++budget, ++nextPoint) {
       const int16_t x = px(points[nextPoint].v);
-      const int16_t y = py(points[nextPoint].a);
-      if (nextPoint) tft.drawLine(px(points[nextPoint - 1].v), py(points[nextPoint - 1].a), x, y, ILI9341_CYAN);
+      const int16_t y = py(points[nextPoint].ma);
+      if (nextPoint) tft.drawLine(px(points[nextPoint - 1].v), py(points[nextPoint - 1].ma), x, y, ILI9341_CYAN);
       tft.drawPixel(x, y, ILI9341_CYAN);
     }
     if (nextPoint == drawnCount) rendering = false;
@@ -91,17 +97,10 @@ class Graph {
   bool dirty = true;
   bool rendering = false;
   size_t drawnCount = 0, nextPoint = 0;
-  float vLow = 0, vHigh = 1, iLow = 0, iHigh = 1;  // Current axis in amps.
-  float iScale = 1000.0f;                             // Amps -> displayed unit (mA or uA).
+  float vLow = 0, vHigh = 1, iLow = 0, iHigh = 1;
   static constexpr int16_t left = 46, top = 45, width = 258, height = 143;
   int16_t px(float v) const { return left + lroundf((v - vLow) * width / (vHigh - vLow)); }
-  int16_t py(float a) const { return top + height - lroundf((a - iLow) * height / (iHigh - iLow)); }
-
-  // Below 1 mA the curve reads better in uA.
-  static void formatCurrent(char* out, size_t size, float a) {
-    if (fabsf(a) < 0.001f) snprintf(out, size, "%.2f uA", a * 1e6f);
-    else snprintf(out, size, "%.3f mA", a * 1e3f);
-  }
+  int16_t py(float ma) const { return top + height - lroundf((ma - iLow) * height / (iHigh - iLow)); }
 
   void text(int16_t x, int16_t y, const char* value, uint16_t color = ILI9341_WHITE) {
     tft.setCursor(x, y);
@@ -111,32 +110,31 @@ class Graph {
 
   void axes() {
     // Autoscale from the same accepted V/A samples sent to the phone.
-    vLow = 0;
-    vHigh = 1;
-    iLow = 0;
-    iHigh = 0.001f;
+    vLow = iLow = 0;
+    vHigh = iHigh = 1;
     if (drawnCount) {
       vLow = vHigh = points[0].v;
-      iLow = iHigh = points[0].a;
+      iLow = iHigh = points[0].ma;
       for (size_t i = 1; i < drawnCount; ++i) {
         vLow = fminf(vLow, points[i].v); vHigh = fmaxf(vHigh, points[i].v);
-        iLow = fminf(iLow, points[i].a); iHigh = fmaxf(iHigh, points[i].a);
+        iLow = fminf(iLow, points[i].ma); iHigh = fmaxf(iHigh, points[i].ma);
       }
       const float dv = vHigh == vLow ? fmaxf(fabsf(vLow) * 0.05f, 0.01f) : (vHigh - vLow) * 0.06f;
-      const float di = iHigh == iLow ? fmaxf(fabsf(iLow) * 0.05f, 1e-9f) : (iHigh - iLow) * 0.08f;
+      const float di = iHigh == iLow ? fmaxf(fabsf(iLow) * 0.05f, 0.000001f) : (iHigh - iLow) * 0.08f;
       vLow -= dv; vHigh += dv; iLow -= di; iHigh += di;
     }
-    const bool micro = fmaxf(fabsf(iLow), fabsf(iHigh)) < 0.001f;
-    iScale = micro ? 1e6f : 1e3f;
     tft.fillScreen(ILI9341_BLACK);
     tft.setTextSize(2);
     text(8, 4, "I-V CURVE", ILI9341_CYAN);
     tft.setTextSize(1);
     text(8, 26, dataFault ? "LCD DATA ERROR" : status);
-    text(200, 26, "RANGE ");
-    text(236, 26, range, ILI9341_YELLOW);
-    text(1, 36, iScale > 1e4f ? "I(uA)" : "I(mA)");
     char label[48];
+    snprintf(label, sizeof(label), "RANGE %s", range);
+    text(262, 8, label, ILI9341_YELLOW);
+    // Points are stored in mA. Below 1 mA the axis is labelled in uA.
+    const bool micro = fmaxf(fabsf(iLow), fabsf(iHigh)) < 1.0f;
+    const float unit = micro ? 1000.0f : 1.0f;
+    text(1, 36, micro ? "I(uA)" : "I(mA)");
     for (int tick = 0; tick <= 4; ++tick) {
       const int16_t x = left + tick * width / 4;
       const int16_t y = top + height - tick * height / 4;
@@ -144,16 +142,19 @@ class Graph {
       tft.drawFastHLine(left, y, width + 1, 0x3186);
       snprintf(label, sizeof(label), "%.2f", vLow + (vHigh - vLow) * tick / 4);
       text(x - 13, top + height + 5, label);
-      snprintf(label, sizeof(label), "%.2f", (iLow + (iHigh - iLow) * tick / 4) * iScale);
+      snprintf(label, sizeof(label), micro ? "%.1f" : "%.2f", (iLow + (iHigh - iLow) * tick / 4) * unit);
       text(1, y - 3, label);
     }
     text(286, 207, "V(V)");
     snprintf(label, sizeof(label), "%u points", static_cast<unsigned>(drawnCount));
     text(8, 212, label);
     if (drawnCount) {
-      char current[24];
-      formatCurrent(current, sizeof(current), points[drawnCount - 1].a);
-      snprintf(label, sizeof(label), "V=%.3f  I=%s", points[drawnCount - 1].v, current);
+      const float lastMa = points[drawnCount - 1].ma;
+      if (fabsf(lastMa) < 1.0f) {
+        snprintf(label, sizeof(label), "V=%.3f  I=%.2f uA", points[drawnCount - 1].v, lastMa * 1000.0f);
+      } else {
+        snprintf(label, sizeof(label), "V=%.3f  I=%.3f mA", points[drawnCount - 1].v, lastMa);
+      }
       text(8, 228, label);
     }
   }

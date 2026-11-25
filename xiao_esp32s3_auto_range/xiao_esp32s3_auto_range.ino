@@ -224,11 +224,7 @@ void handleUartEvent(const char* line) {
     lcd.finish(event["count"] | 0U);
   } else if (strcmp(type, "point") == 0 || strcmp(type, "range") == 0) {
     if (sweep != SweepState::running && sweep != SweepState::stopping) return;
-    if (strcmp(type, "range") == 0) {
-      const char* range = event["range"] | "";
-      if (strcmp(range, "ua") == 0) lcd.setRange("uA (10k)");
-      else if (strcmp(range, "ma") == 0) lcd.setRange("mA (200R)");
-    }
+    if (strcmp(type, "range") == 0) lcd.setRange(event["range"] | "");
   } else {
     return;
   }
