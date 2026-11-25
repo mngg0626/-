@@ -5,10 +5,10 @@
 #include <math.h>
 #include <string.h>
 
-// XIAO labels, not raw GPIO numbers: D5 is GPIO6; D4 is GPIO5.
+// GPIO 번호가 아니라 XIAO 핀 이름임: D5 = GPIO6, D4 = GPIO5.
 namespace ivlcd {
 constexpr int kBacklightPin = D5;
-constexpr size_t kCapacity = 256;  // Auto-range sweep: at most 89 uA points plus 89 mA points.
+constexpr size_t kCapacity = 256;  // 자동 레인지 측정: uA 최대 89점 + mA 최대 89점.
 struct Point { float v; float ma; };
 
 class Graph {
@@ -24,9 +24,9 @@ class Graph {
   void begin() {
     digitalWrite(kBacklightPin, LOW);
     pinMode(kBacklightPin, OUTPUT);
-    SPI.begin(D8, -1, D10, D1);  // SCK, unused MISO, MOSI, CS.
-    tft.begin(16000000);          // Conservative speed for breadboard jumpers.
-    tft.setRotation(1);          // 320 x 240 landscape.
+    SPI.begin(D8, -1, D10, D1);  // SCK, MISO(미사용), MOSI, CS.
+    tft.begin(16000000);          // 점퍼선 배선을 고려해 속도를 낮춤.
+    tft.setRotation(1);          // 320 x 240 가로 화면.
     tft.fillScreen(ILI9341_BLACK);
     tft.setTextWrap(false);
     setBacklight(true);
@@ -35,12 +35,12 @@ class Graph {
   void setBacklight(bool enabled) {
     backlight = enabled;
     digitalWrite(kBacklightPin, enabled ? HIGH : LOW);
-    dirty = true;  // Redraw the latest data when light returns.
+    dirty = true;  // 백라이트가 켜지면 최신 데이터로 다시 그림.
   }
 
   void setStatus(const char* value) { status = value; dirty = true; }
 
-  // Accepts the UNO range name and keeps only a string literal (the JSON buffer is temporary).
+  // UNO가 보낸 레인지 이름을 받아 문자열 상수만 저장함(JSON 버퍼는 곧 사라짐).
   void setRange(const char* value) {
     range = strcmp(value, "ua") == 0 ? "uA" : strcmp(value, "ma") == 0 ? "mA" : "--";
     dirty = true;
@@ -72,7 +72,7 @@ class Graph {
     setStatus(!dataFault && expected > 0 && expected == count ? "COMPLETE" : "INCOMPLETE");
   }
 
-  // Called after UART/BLE/watchdog work. A redraw is split across loop turns.
+  // UART/BLE/감시 처리 뒤에 호출함. 다시 그리기는 여러 loop에 나눠서 함.
   void service() {
     if (!backlight) return;
     if (!rendering) {
@@ -109,7 +109,7 @@ class Graph {
   }
 
   void axes() {
-    // Autoscale from the same accepted V/A samples sent to the phone.
+    // 폰으로 보낸 것과 같은 V/A 값으로 축 범위를 자동 조정함.
     vLow = iLow = 0;
     vHigh = iHigh = 1;
     if (drawnCount) {
@@ -131,7 +131,7 @@ class Graph {
     char label[48];
     snprintf(label, sizeof(label), "RANGE %s", range);
     text(262, 8, label, ILI9341_YELLOW);
-    // Points are stored in mA. Below 1 mA the axis is labelled in uA.
+    // 점은 mA로 저장함. 1 mA 미만이면 축을 uA로 표시함.
     const bool micro = fmaxf(fabsf(iLow), fabsf(iHigh)) < 1.0f;
     const float unit = micro ? 1000.0f : 1.0f;
     text(1, 36, micro ? "I(uA)" : "I(mA)");

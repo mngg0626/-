@@ -3,66 +3,66 @@
 #include <Wire.h>
 #include <math.h>
 
-// Auto-ranging sweep for the stacked mA + uA shields.
-//   mA range: relay released  -> sense node -> 200 ohm -> relay NC -> GND
-//   uA range: relay energized -> sense node -> 10 kohm -> relay NO -> GND (200 ohm path left open)
-// The sweep starts in the uA range and moves to the mA range once the sense voltage
-// passes kUaToMaSenseV. Before the relay moves, the DAC is lowered so the DUT keeps
-// roughly the same operating point instead of seeing the full source voltage at once.
+// mA + uA 실드를 쌓아서 쓰는 자동 레인지 측정.
+//   mA 레인지: 릴레이 꺼짐 -> 센스 노드 -> 200 ohm -> 릴레이 NC(2번) -> GND
+//   uA 레인지: 릴레이 켜짐 -> 센스 노드 -> 10 kohm -> 릴레이 NO(4번) -> GND (200 ohm 경로는 끊김)
+// uA 레인지로 시작하고, 센스 전압이 kUaToMaSenseV를 넘으면 mA 레인지로 바꿈.
+// 릴레이를 바꾸기 전에 DAC를 먼저 낮춰서, DUT에 소스 전압이 한꺼번에 걸리지 않고
+// 직전 동작점 근처가 유지되게 함.
 //
-// Optional start field "range": "auto" (default) | "ua" | "ma".
-//   auto without the ADS1115 falls back to the mA range only.
+// start 명령의 선택 필드 "range": "auto"(기본) | "ua" | "ma".
+//   auto인데 ADS1115가 없으면 mA 레인지로만 측정함.
 
 namespace {
 constexpr uint32_t kBaud = 115200;
-constexpr float kAdcReferenceV = 5.0f;  // Nominal. Corrected at run time from the ADS1115 (see refScale).
+constexpr float kAdcReferenceV = 5.0f;  // 명목값. 측정 중 ADS1115로 보정함(refScale 참고).
 constexpr float kMaSenseOhms = 200.0f;
 constexpr float kUaSenseOhms = 10000.0f;
-constexpr float kSweepCurrentLimitA = 0.008f;  // End the sweep at this measured current boundary.
-constexpr float kCurrentCutoffA = 0.012f;  // Software fault cutoff; the 200 ohm series resistor stays fitted.
+constexpr float kSweepCurrentLimitA = 0.008f;  // 이 전류에 닿으면 측정을 끝냄.
+constexpr float kCurrentCutoffA = 0.012f;  // 소프트웨어 차단 전류. 200 ohm 직렬 저항은 항상 달려 있음.
 constexpr uint16_t kAdcMax = 16383;
 constexpr float kUnoVoltsPerCount = kAdcReferenceV / kAdcMax;
 constexpr float kDacVoltsPerCode = kAdcReferenceV / 1024.0f;
-constexpr uint16_t kLastDacCode = 880;  // Nominal 4.297 V; source voltage, not DUT voltage.
-constexpr uint16_t kDacStep = 10;  // Nominal 48.8 mV; bounds the next-step current increment through 200 ohms.
+constexpr uint16_t kLastDacCode = 880;  // 명목 4.297 V. DUT 전압이 아니라 소스 전압임.
+constexpr uint16_t kDacStep = 10;  // 명목 48.8 mV. 200 ohm에서 한 스텝당 전류 증가폭을 제한함.
 constexpr float kNominalSourceMaxV = kDacVoltsPerCode * kLastDacCode;
 constexpr float kOutputToleranceV = 0.25f;
 static_assert(kNominalSourceMaxV <= 4.3f, "Review DUT ratings before increasing the sweep voltage");
 static_assert(kSweepCurrentLimitA + kDacVoltsPerCode * kDacStep / kMaSenseOhms < kCurrentCutoffA,
               "The normal current boundary must precede the fault cutoff");
-constexpr uint32_t kSettleMs = 220;  // Also covers relay contact bounce after a range change.
+constexpr uint32_t kSettleMs = 220;  // 레인지 전환 뒤 릴레이 접점 떨림 시간도 포함함.
 constexpr uint32_t kSampleSpacingMs = 20;
 constexpr uint8_t kSamples = 10;
 constexpr uint32_t kHeartbeatTimeoutMs = 1200;
 constexpr uint32_t kCurrentCheckMs = 5;
 
-// Range relay on the uA shield: D4 -> 1 k -> Q1 base. With D4 LOW and no DUT, the 200 ohm
-// end on J3 should read 0 ohm to GND. If it is the other way round, set this to false.
+// uA 실드의 레인지 릴레이(G6K-2P-Y): D4 -> 1 k -> Q1 베이스.
+// D4 LOW, DUT 없음 상태에서 A2-GND가 약 200 ohm이면 true, 약 10 kohm이면 false로 바꿈.
 constexpr uint8_t kRangeRelayPin = 4;
 constexpr bool kUaWhenRelayHigh = true;
-constexpr float kUaToMaSenseV = 1.3f;  // 130 uA through 10 kohm.
-// In the uA range the sense node stays below kUaToMaSenseV + one step. A higher reading
-// means the 200 ohm path is still closed, so it is treated as a relay fault before 8 mA.
+constexpr float kUaToMaSenseV = 1.3f;  // 10 kohm 기준 130 uA.
+// uA 레인지에서 센스 노드는 kUaToMaSenseV + 한 스텝을 넘지 않음. 그보다 높으면
+// 200 ohm 경로가 아직 붙어 있다는 뜻이므로 8 mA 전에 릴레이 고장으로 처리함.
 constexpr float kUaFaultSenseV = kSweepCurrentLimitA * kMaSenseOhms;  // 1.6 V
 static_assert(kUaToMaSenseV + kDacVoltsPerCode * kDacStep < kUaFaultSenseV * 0.9f,
               "Leave margin between the uA switch point and the relay fault check");
 
-// ADS1115 on the uA shield. ADDR is tied to GND.
+// uA 실드의 ADS1115. ADDR이 GND에 연결돼 주소는 0x48임.
 constexpr uint8_t kAdsAddress = 0x48;
-constexpr uint8_t kAdsSource = 0;  // Buffered source node.
-constexpr uint8_t kAdsSense = 1;   // Buffered sense node (A2 carries the same node).
+constexpr uint8_t kAdsSource = 0;  // 버퍼를 거친 소스 노드.
+constexpr uint8_t kAdsSense = 1;   // 버퍼를 거친 센스 노드(A2와 같은 노드).
 constexpr float kAdsFullScaleV[] = {6.144f, 4.096f, 2.048f, 1.024f, 0.512f, 0.256f};
 constexpr uint8_t kAdsWidestPga = 0;
 constexpr uint8_t kAdsNarrowestPga = 5;
 constexpr uint16_t kAdsRate250 = 0x5 << 5;
 constexpr uint32_t kAdsTimeoutUs = 20000;
 
-// The UNO ADC uses the USB 5 V as its reference; the ADS1115 has a precise internal one.
-// In the uA range both read the source node, so their ratio corrects the UNO readings
-// in the mA range. Without this the curve shows a small step at the range change.
-constexpr float kCalMinSourceV = 0.3f;  // Skip readings too small to compare.
-constexpr float kCalMaxSourceV = 3.0f;  // Stay below where a 5 V op amp buffer may clip.
-constexpr float kRefScaleMin = 0.94f;   // USB 5 V +-6 %; anything outside is a wiring fault.
+// UNO ADC는 USB 5 V를 기준으로 쓰고, ADS1115는 정밀한 내부 기준을 씀.
+// uA 레인지에서 둘 다 소스 노드를 읽으므로 그 비율로 mA 레인지의 UNO 값을 보정함.
+// 보정이 없으면 레인지가 바뀌는 지점에서 곡선에 작은 단차가 생김.
+constexpr float kCalMinSourceV = 0.3f;  // 너무 작은 값은 비교에서 뺌.
+constexpr float kCalMaxSourceV = 3.0f;  // 5 V 전원 op amp 버퍼가 포화할 수 있는 구간은 뺌.
+constexpr float kRefScaleMin = 0.94f;   // USB 5 V +-6 %. 이 범위 밖이면 배선 이상으로 보고 무시함.
 constexpr float kRefScaleMax = 1.06f;
 
 enum class Range : uint8_t { ua, ma };
@@ -82,11 +82,11 @@ uint16_t dacCode;
 uint16_t seq;
 float sumSourceV;
 float sumSenseV;
-uint32_t sumTrackCounts;  // UNO A1 counts, compared ratiometrically with the DAC code.
+uint32_t sumTrackCounts;  // UNO A1 카운트 합. DAC 코드와 같은 기준으로 비교함.
 uint8_t sampleCount;
 uint8_t sensePga;
-float switchCurrentA = -1;  // uA-range current at the range change, checked on the first mA point.
-float refScale = 1.0f;      // Actual UNO reference / 5 V, learned in the uA range.
+float switchCurrentA = -1;  // 레인지 전환 때의 uA 전류. 첫 mA 측정점에서 확인함.
+float refScale = 1.0f;      // 실제 UNO 기준전압 / 5 V. uA 레인지에서 구함.
 float calAdsV;
 float calUnoV;
 
@@ -132,17 +132,17 @@ bool adsPresent() {
   return Wire.endTransmission() == 0;
 }
 
-// Single-shot, single-ended conversion. Returns false on an I2C fault or timeout.
+// 단발, 단일 입력 변환. I2C 오류나 시간 초과면 false를 돌려줌.
 bool adsVolts(uint8_t channel, uint8_t pga, float& volts, bool& clipped) {
-  const uint16_t config = 0x8000                            // Start one conversion.
-                          | (0x4 | channel) << 12          // AINx against GND.
+  const uint16_t config = 0x8000                            // 변환 1회 시작.
+                          | (0x4 | channel) << 12          // AINx - GND.
                           | static_cast<uint16_t>(pga) << 9
-                          | 0x0100                          // Single-shot mode.
+                          | 0x0100                          // 단발 모드.
                           | kAdsRate250
-                          | 0x0003;                         // Comparator off.
+                          | 0x0003;                         // 비교기 끔.
   if (!adsWrite(1, config)) return false;
   const uint32_t begun = micros();
-  delayMicroseconds(3500);  // Nominal 4 ms at 250 SPS.
+  delayMicroseconds(3500);  // 250 SPS에서 명목 4 ms.
   uint16_t status = 0;
   do {
     if (!adsRead(1, status) || micros() - begun > kAdsTimeoutUs) return false;
@@ -162,7 +162,7 @@ uint8_t pickPga(float coarseV) {
   return pga;
 }
 
-// ---------- Events ----------
+// ---------- 이벤트 전송 ----------
 void sendEvent(const char* type, const char* id, JsonDocument& event) {
   event["proto"] = 1;
   event["type"] = type;
@@ -207,7 +207,7 @@ void acknowledge(const char* id, const char* command, bool ok, const char* reaso
 void zeroOutput() {
   analogWrite(A0, 0);
   measuring = false;
-  setRange(Range::ma);  // Release the relay coil while idle.
+  setRange(Range::ma);  // 대기 중에는 릴레이 코일을 끔.
 }
 
 void fail(const char* code, const char* message) {
@@ -220,7 +220,7 @@ void fail(const char* code, const char* message) {
 
 void finishSweep(Range lastRange, const char* reason) {
   zeroOutput();
-  // Completion means the configured voltage OR current boundary was reached.
+  // 완료는 설정한 전압 또는 전류 한계에 닿았다는 뜻임.
   sendRange(lastRange, reason);
   JsonDocument done;
   done["count"] = seq;
@@ -237,14 +237,14 @@ void setSweepPoint(uint32_t now) {
   nextCurrentCheckAt = now + kCurrentCheckMs;
 }
 
-// Fix the UNO reference scale from the uA-range points collected so far.
+// 지금까지 모은 uA 레인지 측정점으로 UNO 기준전압 비율을 확정함.
 void applyReferenceScale() {
-  if (calUnoV <= 0) return;  // No usable uA points: keep the nominal 5 V.
+  if (calUnoV <= 0) return;  // 쓸 만한 uA 측정점이 없으면 명목 5 V를 유지함.
   const float scale = calAdsV / calUnoV;
   if (scale >= kRefScaleMin && scale <= kRefScaleMax) refScale = scale;
 }
 
-// Lower the source first so the DUT keeps its last operating point, then release the relay.
+// DUT가 직전 동작점을 유지하도록 소스를 먼저 낮추고, 그다음 릴레이를 끔.
 void switchToMa(float dutV, float currentA) {
   switchCurrentA = currentA;
   applyReferenceScale();
@@ -253,7 +253,7 @@ void switchToMa(float dutV, float currentA) {
   if (code > kLastDacCode) code = kLastDacCode;
   if (code < 0) code = 0;
   dacCode = static_cast<uint16_t>(code);
-  analogWrite(A0, dacCode);  // The 10 k path still limits the current here.
+  analogWrite(A0, dacCode);  // 이 시점에는 10 k 경로가 아직 전류를 제한함.
   delay(2);
   setRange(Range::ma);
   sendRange(Range::ma, "전류 130µA 도달 · mA 레인지(200Ω) 전환");
@@ -321,7 +321,7 @@ void handleCommand(const char* line) {
 }
 
 void readCommands() {
-  // Bound work per iteration so serial input cannot starve the watchdog.
+  // 한 번에 처리할 양을 제한해서 시리얼 입력 때문에 감시 처리가 밀리지 않게 함.
   for (size_t read = 0; read < sizeof(rx) && Serial1.available(); ++read) {
     const char byte = static_cast<char>(Serial1.read());
     if (byte == '\n') {
@@ -336,7 +336,7 @@ void readCommands() {
   }
 }
 
-// One uA-range sample through the ADS1115. The sense gain is chosen once per point.
+// ADS1115로 uA 레인지 샘플 1개를 읽음. 센스 이득은 측정점마다 한 번 정함.
 bool readUaSample(float& sourceV, float& senseV) {
   bool clipped = false;
   if (sampleCount == 0) {
@@ -363,8 +363,8 @@ void completePoint(uint32_t now) {
   const Range pointRange = range;
   const float sourceV = sumSourceV / kSamples;
   const float senseV = sumSenseV / kSamples;
-  // UNO A1 and the DAC share the USB 5 V reference, so this check is immune to its error
-  // and to a clipping buffer on the uA shield.
+  // UNO A1과 DAC는 같은 USB 5 V를 기준으로 쓰므로 그 오차가 상쇄됨.
+  // uA 실드 버퍼가 포화해도 이 검사에는 영향이 없음.
   const float trackedV = sumTrackCounts * kUnoVoltsPerCount / kSamples;
   const float targetV = kDacVoltsPerCode * dacCode;
   if (fabsf(trackedV - targetV) > kOutputToleranceV) {
@@ -377,8 +377,8 @@ void completePoint(uint32_t now) {
     calUnoV += trackedV;
   }
   if (pointRange == Range::ma && switchCurrentA > 0) {
-    // The DAC is set so the DUT keeps its operating point, plus one step (at most about
-    // 0.24 mA more). A current far outside that band means the relay did not move.
+    // DAC는 DUT 동작점에 한 스텝을 더한 값으로 맞춰져 있음(최대 약 0.24 mA 증가).
+    // 이 범위를 크게 벗어나면 릴레이가 움직이지 않은 것임.
     const float stepA = kDacVoltsPerCode * kDacStep / kMaSenseOhms;
     const bool jumped = currentA > switchCurrentA + 1.5f * stepA || currentA < switchCurrentA * 0.5f;
     switchCurrentA = -1;
@@ -417,7 +417,7 @@ void measure(uint32_t now) {
   if (!due(now, nextCurrentCheckAt)) return;
   nextCurrentCheckAt = now + kCurrentCheckMs;
 
-  // Fast guard on the UNO ADC in both ranges.
+  // 두 레인지 모두 UNO ADC로 빠르게 보호 검사함.
   const uint16_t rawA2 = analogRead(A2);
   const float fastSenseV = unoVolts(rawA2);
   if (fastSenseV >= kCurrentCutoffA * kMaSenseOhms) {
@@ -432,7 +432,7 @@ void measure(uint32_t now) {
     if (!seq) {
       fail("OUTPUT_NOT_ZERO", "Current detected before a valid first point. Check output and wiring.");
     } else {
-      // Do not append an unsettled or over-boundary point. Keep the last completed averages.
+      // 안정되지 않았거나 한계를 넘은 점은 보내지 않음. 마지막으로 완료된 평균값까지만 남김.
       finishSweep(Range::ma, "전류 상한 8mA 도달 · 마지막 안정 측정점까지 완료 · 최대 전압 미도달");
     }
     return;
@@ -461,14 +461,14 @@ void measure(uint32_t now) {
 }  // namespace
 
 void setup() {
-  pinMode(2, INPUT);  // D2 shares the sense node on the mA shield.
+  pinMode(2, INPUT);  // mA 실드에서 D2가 센스 노드와 연결돼 있어 입력으로 둠.
   pinMode(kRangeRelayPin, OUTPUT);
   analogWriteResolution(10);
   analogReadResolution(14);
   zeroOutput();
   Wire.begin();
   Wire.setClock(400000);
-  Serial1.begin(kBaud);  // D0 RX / D1 TX, independent of USB Serial.
+  Serial1.begin(kBaud);  // D0 RX / D1 TX. USB Serial과 별개임.
 }
 
 void loop() {
